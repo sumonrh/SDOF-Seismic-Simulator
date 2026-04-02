@@ -95,6 +95,7 @@ export function solveSDOF(
   const ug_disp = new Float64Array(n);
 
   let pU = 0;
+  let pUgd = 0;
   let pVb = 0;
   let pAabs = 0;
   let sumMa = 0;
@@ -129,6 +130,7 @@ export function solveSDOF(
     sumCv += acv;
 
     if (Math.abs(u[i]) > pU) pU = Math.abs(u[i]);
+    if (Math.abs(ug_disp[i]) > pUgd) pUgd = Math.abs(ug_disp[i]);
     if (Math.abs(Vb[i]) > pVb) pVb = Math.abs(Vb[i]);
     if (Math.abs(a_abs[i]) > pAabs) pAabs = Math.abs(a_abs[i]);
   }
@@ -156,6 +158,7 @@ export function solveSDOF(
     tKu: (sumKu / den) * 100,
     tCv: (sumCv / den) * 100,
     pU,
+    pUgd,
     pVb,
     pAabs,
     fn,
@@ -168,7 +171,7 @@ export function calculateSpectra(
   zeta: number
 ): SpectraData {
   if (!motion || !motion.t || !motion.ug || motion.t.length < 2) {
-    return { periods: [], Sa: [], Sv: [], Sd: [], peakT: 0, peakSa: 0 };
+    return { periods: [], Sa: [], Sv: [], Sd: [], peakTimes: [], peakT: 0, peakSa: 0 };
   }
   const { t, ug } = motion;
   const n = t.length;
@@ -179,6 +182,8 @@ export function calculateSpectra(
   const Sa: number[] = [];
   const Sv: number[] = [];
   const Sd: number[] = [];
+  const peakTimes: number[] = [];
+  const peakSigns: number[] = [];
 
   let peakT = 0;
   let peakSa = 0;
@@ -212,6 +217,8 @@ export function calculateSpectra(
     const ke = k + a0b * m + a1b * c;
 
     let maxU = 0;
+    let tPeak = 0;
+    let signPeak = 1;
     for (let i = 0; i < n - 1; i++) {
       const pe =
         p[i + 1] +
@@ -220,13 +227,19 @@ export function calculateSpectra(
       u[i + 1] = pe / ke;
       a[i + 1] = a0b * (u[i + 1] - u[i]) - a2 * v[i] - a3 * a[i];
       v[i + 1] = v[i] + a6 * a[i] + a7 * a[i + 1];
-      if (Math.abs(u[i + 1]) > maxU) maxU = Math.abs(u[i + 1]);
+      if (Math.abs(u[i + 1]) > maxU) {
+        maxU = Math.abs(u[i + 1]);
+        tPeak = t[i + 1];
+        signPeak = Math.sign(u[i + 1]) || 1;
+      }
     }
 
     const curSa = (wn * wn * maxU) / 9.81; // Pseudo-spectral acceleration (g)
     Sa.push(curSa);
     Sv.push(wn * maxU); // Pseudo-spectral velocity (m/s)
     Sd.push(maxU); // Spectral displacement (m)
+    peakTimes.push(tPeak);
+    peakSigns.push(signPeak);
 
     if (curSa > peakSa) {
       peakSa = curSa;
@@ -234,7 +247,135 @@ export function calculateSpectra(
     }
   }
 
-  return { periods, Sa, Sv, Sd, peakT, peakSa };
+  return { periods, Sa, Sv, Sd, peakTimes, peakSigns, peakT, peakSa };
+}
+
+/**
+ * Sanitizes spectrum points by filtering out invalid values and sorting by period.
+ */
+export function sanitizeSpectrumPoints(points: { period: number; sa: number }[]): { period: number; sa: number }[] {
+  const valid = points.filter(p => Number.isFinite(p.period) && Number.isFinite(p.sa) && p.period >= 0);
+  const sorted = [...valid].sort((a, b) => a.period - b.period);
+  
+  const deduped: { period: number; sa: number }[] = [];
+  for (const point of sorted) {
+    const last = deduped[deduped.length - 1];
+    if (last && Math.abs(last.period - point.period) < 1e-12) {
+      deduped[deduped.length - 1] = point;
+    } else {
+      deduped.push(point);
+    }
+  }
+  return deduped;
+}
+
+/**
+ * Interpolates the spectral acceleration (Sa) for a given period (T) from a set of spectrum points.
+ */
+export function interpolateSa(points: { period: number; sa: number }[], T: number): number | null {
+  const spec = sanitizeSpectrumPoints(points);
+  if (!spec.length || !Number.isFinite(T)) return null;
+
+  if (T <= spec[0].period) return spec[0].sa;
+  if (T >= spec[spec.length - 1].period) return spec[spec.length - 1].sa;
+
+  for (let i = 1; i < spec.length; i++) {
+    const p0 = spec[i - 1];
+    const p1 = spec[i];
+
+    if (p1.period <= p0.period) continue;
+
+    if (T <= p1.period) {
+      const ratio = (T - p0.period) / (p1.period - p0.period);
+      return p0.sa + (p1.sa - p0.sa) * ratio;
+    }
+  }
+
+  return spec[spec.length - 1].sa;
+}
+
+// Wavelet matching logic moved to waveletMatcher.ts
+
+
+/**
+ * Simple baseline correction to ensure zero final velocity and displacement.
+ */
+export function baselineCorrect(ug: Float64Array, dt: number): Float64Array {
+  const n = ug.length;
+  const corrected = new Float64Array(ug);
+  const T = (n - 1) * dt;
+
+  // Pass 1: Zero velocity (subtract constant offset)
+  let velFinal = 0;
+  for (let i = 0; i < n; i++) {
+    velFinal += (i === 0 || i === n - 1 ? 0.5 : 1.0) * corrected[i] * dt;
+  }
+  const c0 = velFinal / T;
+  for (let i = 0; i < n; i++) {
+    corrected[i] -= c0;
+  }
+
+  // Pass 2: Zero displacement (subtract function with zero integral)
+  // a_corr(t) = c1*t + c2*t^2
+  // This correction ensures final displacement is zero without changing final velocity.
+  const vel = new Float64Array(n);
+  const disp = new Float64Array(n);
+  for (let i = 1; i < n; i++) {
+    vel[i] = vel[i - 1] + 0.5 * (corrected[i] + corrected[i - 1]) * dt;
+    disp[i] = disp[i - 1] + 0.5 * (vel[i] + vel[i - 1]) * dt;
+  }
+  const dispFinal = disp[n - 1];
+  const c1 = 24.0 * dispFinal / Math.pow(T, 3);
+  const c2 = -36.0 * dispFinal / Math.pow(T, 4);
+  
+  for (let i = 0; i < n; i++) {
+    const ti = i * dt;
+    corrected[i] -= (c1 * ti + c2 * ti * ti);
+  }
+
+  return corrected;
+}
+
+/**
+ * Calculates strong motion parameters for verification.
+ */
+export function calculateStrongMotionParameters(motion: GroundMotion) {
+  const { t, ug } = motion;
+  const n = t.length;
+  const dt = (t[n - 1] - t[0]) / (n - 1);
+  const g = 9.81;
+
+  // 1. PGA
+  let pga = 0;
+  for (const a of ug) if (Math.abs(a) > pga) pga = Math.abs(a);
+
+  // 2. Arias Intensity (Ia)
+  // Ia = (pi / 2g) * integral(a(t)^2 dt)
+  const aSquared = ug.map(a => a * a);
+  let totalIa = 0;
+  const iaTimeHistory = new Float64Array(n);
+  
+  for (let i = 0; i < n; i++) {
+    if (i > 0) {
+      const stepIa = (Math.PI / (2 * g)) * 0.5 * (aSquared[i] + aSquared[i-1]) * dt;
+      totalIa += stepIa;
+    }
+    iaTimeHistory[i] = totalIa;
+  }
+
+  // 3. Significant Duration (D5-95)
+  let t5 = 0;
+  let t95 = 0;
+  for (let i = 0; i < n; i++) {
+    if (iaTimeHistory[i] >= 0.05 * totalIa && t5 === 0) t5 = t[i];
+    if (iaTimeHistory[i] >= 0.95 * totalIa && t95 === 0) t95 = t[i];
+  }
+
+  return {
+    pga: pga / g, // in g
+    ariasIntensity: totalIa, // in m/s
+    significantDuration: t95 - t5 // in s
+  };
 }
 
 /**
@@ -353,6 +494,58 @@ export function generateSyntheticMotion(
   return { t, ug };
 }
 
+/**
+ * Calculates a scaling factor to match a target response spectrum.
+ * Uses a simple ratio of average spectral accelerations at target periods.
+ */
+export function calculateScalingFactor(
+  motion: GroundMotion,
+  targetSpectrum: { period: number; sa: number }[],
+  zeta: number
+): number {
+  if (!motion || !motion.ug || targetSpectrum.length === 0) return 1.0;
+
+  // 1. Calculate current spectrum
+  const currentSpectra = calculateSpectra(motion, zeta);
+  
+  // 2. Compare average Sa at target periods
+  let sumTarget = 0;
+  let sumCurrent = 0;
+  let count = 0;
+  
+  for (const targetPoint of targetSpectrum) {
+    const t = targetPoint.period;
+    const saTarget = targetPoint.sa;
+    
+    // Linear interpolation of current spectrum
+    let saCurrent = 0;
+    const periods = currentSpectra.periods;
+    const Sa = currentSpectra.Sa;
+    
+    const idx = periods.findIndex(p => p >= t);
+    if (idx === 0) {
+      saCurrent = Sa[0];
+    } else if (idx === -1) {
+      saCurrent = Sa[Sa.length - 1];
+    } else {
+      const p0 = periods[idx - 1];
+      const p1 = periods[idx];
+      const s0 = Sa[idx - 1];
+      const s1 = Sa[idx];
+      saCurrent = s0 + (s1 - s0) * (t - p0) / (p1 - p0);
+    }
+    
+    if (saCurrent > 0) {
+      sumTarget += saTarget;
+      sumCurrent += saCurrent;
+      count++;
+    }
+  }
+  
+  if (count === 0 || sumCurrent === 0) return 1.0;
+  return sumTarget / sumCurrent;
+}
+
 export function parseMotionFile(text: string): GroundMotion {
   const lines = text.trim().split("\n");
   const t: number[] = [];
@@ -372,4 +565,22 @@ export function parseMotionFile(text: string): GroundMotion {
     }
   }
   return { t, ug };
+}
+
+export function parseTargetSpectrum(text: string): { period: number; sa: number }[] {
+  const lines = text.trim().split("\n");
+  const data: { period: number; sa: number }[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line || line.toLowerCase().includes("period")) continue;
+    const parts = line.split(/[,\s\t]+/).filter((x) => x !== "");
+    if (parts.length >= 2) {
+      const p = parseFloat(parts[0]);
+      const s = parseFloat(parts[1]);
+      if (!isNaN(p) && !isNaN(s)) {
+        data.push({ period: p, sa: s });
+      }
+    }
+  }
+  return data;
 }

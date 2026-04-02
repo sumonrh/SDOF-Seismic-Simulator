@@ -1,5 +1,5 @@
 {
-  "name": "Seismic SDOF Simulator",
+  "name": "SDOF Seismic Simulator",
   "description": "A technical dashboard for simulating Single Degree of Freedom (SDOF) structural response to seismic ground motions using the Newmark-Beta numerical method.",
   "requestFramePermissions": []
 }

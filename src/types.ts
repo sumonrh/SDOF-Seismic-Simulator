@@ -24,6 +24,7 @@ export interface SimulationResults {
   tKu: number; // total stiffness share
   tCv: number; // total damping share
   pU: number; // peak relative displacement
+  pUgd: number; // peak ground displacement
   pVb: number; // peak base shear
   pAabs: number; // peak absolute acceleration
   fn: number; // natural frequency
@@ -35,6 +36,8 @@ export interface SpectraData {
   Sa: number[]; // Pseudo-Spectral acceleration (g)
   Sv: number[]; // Pseudo-Spectral velocity (m/s)
   Sd: number[]; // Spectral displacement (m)
+  peakTimes: number[]; // Time of peak response for each period
+  peakSigns?: number[]; // Sign of peak response for each period
   peakT: number;
   peakSa: number;
 }

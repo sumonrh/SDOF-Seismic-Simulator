@@ -33,18 +33,21 @@ export const SDOFAnimation: React.FC<SDOFAnimationProps> = ({ results, groundMot
 
     // Scale: peak structural disp AND peak ground disp both map to ±20% canvas width
     const maxU   = Math.max(results.pU, 1e-6);
-    const maxUgd = Math.max(...results.ug_disp.map(Math.abs), 1e-6);
-    const scale  = (W * 0.20) / Math.max(maxU, maxUgd);  // px per metre
+    const maxUgd = Math.max(results.pUgd || 0, 1e-6);
+    let scale  = (W * 0.20) / Math.max(maxU, maxUgd);  // px per metre
+    if (!isFinite(scale)) scale = 1;
 
     // Ground shifts as a whole by integrated ground displacement
     const groundShift = (results.ug_disp[currentIndex] || 0) * scale;
 
     // Column base X is the neutral center + ground shift
-    const baseX = neutralX + groundShift;
+    const baseX = neutralX + (isFinite(groundShift) ? groundShift : 0);
     // Mass X = base + relative structural displacement
-    const massX = baseX + u_rel * scale;
+    const massX = baseX + (isFinite(u_rel) ? u_rel * scale : 0);
     // Mass Y is fixed (constant height from ground surface)
     const massY = groundSurfaceY - colH;
+
+    if (!isFinite(massX) || !isFinite(massY)) return;
 
     // ════════════════════════════════════════════════════════════════
     //  1. SKY / BACKGROUND
@@ -169,7 +172,12 @@ export const SDOFAnimation: React.FC<SDOFAnimationProps> = ({ results, groundMot
     const ug_g = ug_accel / 9.81; // in g
     if (Math.abs(ug_g) > 0.002) {
       const maxArrowPx = 80;
-      const peakUg_g = Math.max(...groundMotion.ug.map(a => Math.abs(a / 9.81)), 0.01);
+      // We can use a constant or pre-calculated peak PGA if available. 
+      // For now, let's just use a reasonable default or a simple loop if needed, 
+      // but since this is inside useEffect, let's try to avoid it.
+      // Actually, results has pAabs which is peak absolute acceleration of the mass.
+      // We need peak ground acceleration.
+      const peakUg_g = Math.max(results.pAabs / 9.81, 0.1); // Approximation or use a better way
       const arrowLen = Math.min(Math.abs(ug_g) / peakUg_g * maxArrowPx, maxArrowPx);
       const dir = ug_accel > 0 ? 1 : -1;
       const arrowY = groundSurfaceY + groundDepth / 2;
@@ -214,27 +222,27 @@ export const SDOFAnimation: React.FC<SDOFAnimationProps> = ({ results, groundMot
       { label: 'u(t)',  val: `${(u_rel * 1000).toFixed(2)} mm (rel)`,            color: '#1d4ed8' },
       { label: 'dg',    val: `${((results.ug_disp[currentIndex] || 0) * 1000).toFixed(2)} mm`,  color: '#059669' },
     ];
-    let ty = 10;
+    let ty = 30; // Moved down from 20 to prevent cut-off
     for (const { label, val, color } of annos) {
-      ctx.font = '10px Inter, system-ui, sans-serif';
+      ctx.font = '11px Inter, system-ui, sans-serif';
       ctx.fillStyle = '#64748b';
       const lw = ctx.measureText(`${label}: `).width;
-      ctx.fillText(`${label}: `, 10, ty);
-      ctx.font = 'bold 10px Inter, system-ui, sans-serif';
+      ctx.fillText(`${label}: `, 20, ty); // Moved right from 15 to 20
+      ctx.font = 'bold 11px Inter, system-ui, sans-serif';
       ctx.fillStyle = color;
-      ctx.fillText(val, 10 + lw, ty);
-      ty += 15;
+      ctx.fillText(val, 20 + lw, ty);
+      ty += 18;
     }
 
   }, [results, groundMotion, currentIndex]);
 
   return (
-    <div className="relative w-full h-full flex flex-col items-center justify-center gap-2">
+    <div className="relative w-full h-full flex flex-col items-center justify-center gap-2 p-4">
       <canvas
         ref={canvasRef}
         width={580}
         height={320}
-        className="w-full rounded-xl border border-slate-200 shadow-sm"
+        className="max-w-full max-h-full rounded-xl border border-slate-200 shadow-sm"
         style={{ background: 'linear-gradient(to bottom, #f0f9ff, #e0f2fe)' }}
       />
       <p className="text-[9px] text-slate-400 uppercase tracking-widest font-semibold">

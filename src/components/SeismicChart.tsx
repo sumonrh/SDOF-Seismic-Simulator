@@ -19,11 +19,13 @@ interface ChartProps {
   data: any[];
   title: string;
   xKey: string;
-  yKeys: { key: string; name: string; color: string; strokeDasharray?: string }[];
+  yKeys: { key: string; name: string; color: string; strokeDasharray?: string; strokeWidth?: number; type?: "monotone" | "linear" | "step" | "stepBefore" | "stepAfter" }[];
   xAxisLabel?: string;
   yAxisLabel?: string;
   isArea?: boolean;
   highlightIndex?: number | null;
+  xTicks?: number[];
+  referenceLines?: { x?: number; y?: number; label?: string; color?: string; strokeDasharray?: string }[];
 }
 
 export const SeismicChart: React.FC<ChartProps> = ({ 
@@ -34,7 +36,9 @@ export const SeismicChart: React.FC<ChartProps> = ({
   xAxisLabel, 
   yAxisLabel,
   isArea = false,
-  highlightIndex = null
+  highlightIndex = null,
+  xTicks,
+  referenceLines = []
 }) => {
   const [left, setLeft] = useState<string | number>('auto');
   const [right, setRight] = useState<string | number>('auto');
@@ -133,6 +137,7 @@ export const SeismicChart: React.FC<ChartProps> = ({
               type="number"
               domain={[left, right]}
               allowDataOverflow
+              ticks={xTicks}
             />
             <YAxis 
               label={{ value: yAxisLabel, angle: -90, position: 'insideLeft', fontSize: 10 }}
@@ -145,6 +150,17 @@ export const SeismicChart: React.FC<ChartProps> = ({
               labelFormatter={(value) => `${xAxisLabel}: ${value}`}
             />
             <Legend wrapperStyle={{ fontSize: '10px', paddingTop: '10px' }} />
+            {referenceLines.map((rl, idx) => (
+              <ReferenceLine 
+                key={idx}
+                x={rl.x} 
+                y={rl.y} 
+                stroke={rl.color || "#ef4444"} 
+                strokeWidth={1} 
+                strokeDasharray={rl.strokeDasharray || "3 3"}
+                label={rl.label ? { value: rl.label, position: 'insideTopLeft', fontSize: 10, fill: rl.color || "#ef4444", offset: 10 } : undefined}
+              />
+            ))}
             {yKeys.map((yk) => (
               isArea ? (
                 <Area
@@ -161,14 +177,15 @@ export const SeismicChart: React.FC<ChartProps> = ({
               ) : (
                 <Line
                   key={yk.key}
-                  type="monotone"
+                  type={yk.type || "monotone"}
                   dataKey={yk.key}
                   name={yk.name}
                   stroke={yk.color}
-                  strokeWidth={2}
+                  strokeWidth={yk.strokeWidth || 2}
                   dot={false}
                   strokeDasharray={yk.strokeDasharray}
                   isAnimationActive={false}
+                  connectNulls={true}
                 />
               )
             ))}
