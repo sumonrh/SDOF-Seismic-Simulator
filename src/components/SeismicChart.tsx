@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import { 
   LineChart, 
   Line, 
@@ -24,6 +24,7 @@ interface ChartProps {
   yAxisLabel?: string;
   isArea?: boolean;
   highlightIndex?: number | null;
+  showAbsMax?: boolean;
   xTicks?: number[];
   referenceLines?: { x?: number; y?: number; label?: string; color?: string; strokeDasharray?: string }[];
 }
@@ -37,6 +38,7 @@ export const SeismicChart: React.FC<ChartProps> = ({
   yAxisLabel,
   isArea = false,
   highlightIndex = null,
+  showAbsMax = false,
   xTicks,
   referenceLines = []
 }) => {
@@ -52,6 +54,18 @@ export const SeismicChart: React.FC<ChartProps> = ({
   const ChartComponent = isArea ? AreaChart : LineChart;
 
   const highlightX = highlightIndex !== null && data[highlightIndex] ? data[highlightIndex][xKey] : null;
+
+  const absMax = useMemo(() => {
+    if (!data || data.length === 0) return 0;
+    let max = 0;
+    data.forEach(d => {
+      yKeys.forEach(yk => {
+        const val = Math.abs(d[yk.key]);
+        if (val > max) max = val;
+      });
+    });
+    return max;
+  }, [data, yKeys]);
 
   const zoom = useCallback(() => {
     if (refAreaLeft === refAreaRight || refAreaRight === '') {
@@ -96,7 +110,14 @@ export const SeismicChart: React.FC<ChartProps> = ({
   return (
     <div className="w-full h-full flex flex-col group relative">
       <div className="flex items-center justify-between mb-2 px-2">
-        <h3 className="text-sm font-bold text-slate-700">{title}</h3>
+        <div className="flex items-center gap-3">
+          <h3 className="text-sm font-bold text-slate-700">{title}</h3>
+          {showAbsMax && absMax > 0 && (
+            <div className="px-2 py-0.5 bg-slate-100 rounded text-[10px] font-black text-slate-500 border border-slate-200">
+              ABS MAX: {absMax < 1 ? absMax.toFixed(4) : absMax.toFixed(2)}
+            </div>
+          )}
+        </div>
         {(left !== 'auto' || top !== 'auto') && (
           <button 
             onClick={zoomOut}

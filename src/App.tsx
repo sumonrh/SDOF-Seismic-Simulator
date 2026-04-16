@@ -21,14 +21,18 @@ import {
   Maximize2,
   X,
   Check,
+  Copy,
   AlertTriangle,
+  Gauge,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   SimulationResults,
   SpectraData,
   GroundMotion,
+  HazardPoint,
 } from './types';
+import { DEFAULT_HAZARD, DEFAULT_PGA_REFS } from './constants';
 import {
   solveSDOF,
   calculateSpectra,
@@ -44,9 +48,11 @@ import {
 import { matchSpectrumWavelet } from './utils/waveletMatcher';
 import { SeismicChart } from './components/SeismicChart';
 import { SDOFAnimation } from './components/SDOFAnimation';
+import { HazardCalculator } from './components/HazardCalculator';
+import { ForceDialGauge } from './components/ForceDialGauge';
 import { cn } from './utils/cn';
 
-type AppTab = 'response' | 'spectra' | 'scaling' | 'help';
+type AppTab = 'response' | 'spectra' | 'scaling' | 'hazard' | 'help';
 type ScalingMethod = 'linear' | 'wavelet';
 type SpectrumPoint = { period: number; sa: number };
 
@@ -159,6 +165,14 @@ export default function App() {
   const [currentTimeIndex, setCurrentTimeIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
+  const [showForceDial, setShowForceDial] = useState(false);
+  const [targetSpectrumCopied, setTargetSpectrumCopied] = useState(false);
+
+  // Hazard Analysis State (lifted for persistence)
+  const [hazardSiteClass, setHazardSiteClass] = useState("C");
+  const [hazardDamping, setHazardDamping] = useState(0.05);
+  const [hazardPgaRefs, setHazardPgaRefs] = useState(DEFAULT_PGA_REFS);
+  const [hazardCurves, setHazardCurves] = useState<Record<string, HazardPoint[]>>(JSON.parse(JSON.stringify(DEFAULT_HAZARD)));
 
   const previewScale = useMemo(() => {
     return Number.isFinite(calculatedScale) && calculatedScale > 0
@@ -427,11 +441,11 @@ export default function App() {
         time: parseFloat(results.t[i].toFixed(3)),
         u: parseFloat((results.u[i] * 1000).toFixed(3)), // mm
         a_abs: parseFloat((results.a_abs[i] / 9.81).toFixed(3)), // g
-        p: parseFloat(results.p[i].toFixed(1)),
-        fma: parseFloat(results.fma[i].toFixed(1)),
-        fku: parseFloat(results.fku[i].toFixed(1)),
-        fcv: parseFloat(results.fcv[i].toFixed(1)),
-        Vb: parseFloat(results.Vb[i].toFixed(1)),
+        p: parseFloat((results.p[i] / 1000).toFixed(3)), // kN
+        fma: parseFloat((results.fma[i] / 1000).toFixed(3)), // kN
+        fku: parseFloat((results.fku[i] / 1000).toFixed(3)), // kN
+        fcv: parseFloat((results.fcv[i] / 1000).toFixed(3)), // kN
+        Vb: parseFloat((results.Vb[i] / 1000).toFixed(3)), // kN
         s_ma: parseFloat(results.s_ma[i].toFixed(1)),
         s_ku: parseFloat(results.s_ku[i].toFixed(1)),
         s_cv: parseFloat(results.s_cv[i].toFixed(1)),
@@ -440,6 +454,15 @@ export default function App() {
 
     return data;
   }, [results, chartStep]);
+
+  const maxForce = useMemo(() => {
+    if (!chartData || chartData.length === 0) return 1;
+    let max = 0;
+    for (const d of chartData) {
+      max = Math.max(max, Math.abs(d.p), Math.abs(d.fma), Math.abs(d.fku), Math.abs(d.fcv));
+    }
+    return max || 1;
+  }, [chartData]);
 
   const spectraChartData = useMemo(() => {
     if (!spectra) return [];
@@ -770,6 +793,45 @@ export default function App() {
     );
   };
 
+  const handleTargetSpectrumPaste = (e: React.ClipboardEvent, startIdx: number, startCol: number) => {
+    if (isManualScale) return;
+    e.preventDefault();
+    const clipboardData = e.clipboardData.getData('text');
+    const rows = clipboardData.split(/\r?\n/).filter(row => row.trim() !== '');
+    
+    setTargetSpectrum((prev) => {
+      const next = [...prev];
+      
+      rows.forEach((row, rowOffset) => {
+        const cols = row.split(/\t/);
+        const targetIdx = startIdx + rowOffset;
+        
+        if (targetIdx >= next.length) {
+          next.push({ period: 0, sa: 0 });
+        }
+        
+        cols.forEach((val, colOffset) => {
+          const targetCol = startCol + colOffset;
+          const numVal = Number(val.replace(/,/g, ''));
+          if (!isNaN(numVal)) {
+            if (targetCol === 0) next[targetIdx].period = numVal;
+            else if (targetCol === 1) next[targetIdx].sa = numVal;
+          }
+        });
+      });
+      
+      return next;
+    });
+  };
+
+  const copyTargetSpectrum = () => {
+    const tsv = targetSpectrum.map(pt => `${pt.period}\t${pt.sa}`).join('\n');
+    navigator.clipboard.writeText(tsv).then(() => {
+      setTargetSpectrumCopied(true);
+      setTimeout(() => setTargetSpectrumCopied(false), 2000);
+    });
+  };
+
   return (
     <div className="flex h-screen bg-slate-50 text-slate-900 overflow-hidden font-sans">
       {/* Sidebar */}
@@ -1077,6 +1139,17 @@ export default function App() {
               Scaling
             </button>
             <button
+              onClick={() => setActiveTab('hazard')}
+              className={cn(
+                'py-5 text-xs font-black uppercase tracking-widest border-b-2 transition-all',
+                activeTab === 'hazard'
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-slate-400 hover:text-slate-600'
+              )}
+            >
+              S06-19 Hazard
+            </button>
+            <button
               onClick={() => setActiveTab('help')}
               className={cn(
                 'py-5 text-xs font-black uppercase tracking-widest border-b-2 transition-all',
@@ -1272,6 +1345,7 @@ export default function App() {
                         yAxisLabel="Accel (g)"
                         yKeys={[{ key: 'ug', name: 'Ground Accel', color: '#64748b' }]}
                         highlightIndex={groundHighlightIndex}
+                        showAbsMax={true}
                       />
                     </div>
                   </div>
@@ -1293,6 +1367,7 @@ export default function App() {
                           },
                         ]}
                         highlightIndex={chartHighlightIndex}
+                        showAbsMax={true}
                       />
                     </div>
 
@@ -1311,16 +1386,27 @@ export default function App() {
                           },
                         ]}
                         highlightIndex={chartHighlightIndex}
+                        showAbsMax={true}
                       />
                     </div>
 
-                    <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm h-[400px]">
+                    <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm h-[400px] relative">
+                      {!showForceDial && (
+                        <button
+                          onClick={() => setShowForceDial(true)}
+                          className="absolute top-6 right-6 z-10 flex items-center gap-2 px-3 py-1.5 bg-white border border-slate-200 rounded-lg shadow-sm text-xs font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors"
+                          title="Show Force Dial"
+                        >
+                          <Gauge size={14} />
+                          Show Dial
+                        </button>
+                      )}
                       <SeismicChart
                         data={chartData}
                         title="Force Balance (Inertia, Damping, Stiffness)"
                         xKey="time"
                         xAxisLabel="Time (s)"
-                        yAxisLabel="Force (N)"
+                        yAxisLabel="Force (kN)"
                         yKeys={[
                           { key: 'fma', name: 'Inertia (m·a)', color: '#3b82f6' },
                           { key: 'fku', name: 'Stiffness (k·u)', color: '#10b981' },
@@ -1334,6 +1420,18 @@ export default function App() {
                         ]}
                         highlightIndex={chartHighlightIndex}
                       />
+                      {chartData[chartHighlightIndex] && showForceDial && (
+                        <div className="absolute top-14 right-6 z-20">
+                          <ForceDialGauge
+                            fma={chartData[chartHighlightIndex].fma}
+                            fku={chartData[chartHighlightIndex].fku}
+                            fcv={chartData[chartHighlightIndex].fcv}
+                            p={chartData[chartHighlightIndex].p}
+                            maxForce={maxForce}
+                            onClose={() => setShowForceDial(false)}
+                          />
+                        </div>
+                      )}
                     </div>
 
                     <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm h-[400px]">
@@ -1561,12 +1659,21 @@ export default function App() {
                           <h3 className="text-xs font-black text-slate-500 uppercase tracking-widest">
                             Target Spectrum
                           </h3>
-                          <label
-                            className={cn(
-                              'cursor-pointer p-2 bg-slate-50 hover:bg-slate-100 rounded-lg transition-colors group',
-                              isManualScale && 'cursor-not-allowed'
-                            )}
-                          >
+                          <div className="flex items-center gap-3">
+                            <button 
+                              onClick={copyTargetSpectrum}
+                              title="Copy table to clipboard"
+                              className="text-slate-400 hover:text-blue-600 transition-colors flex items-center gap-1"
+                            >
+                              {targetSpectrumCopied ? <Check size={14} className="text-emerald-500" /> : <Copy size={14} />}
+                              <span className="text-[10px] font-medium uppercase tracking-wider">{targetSpectrumCopied ? 'Copied' : 'Copy'}</span>
+                            </button>
+                            <label
+                              className={cn(
+                                'cursor-pointer p-2 bg-slate-50 hover:bg-slate-100 rounded-lg transition-colors group',
+                                isManualScale && 'cursor-not-allowed'
+                              )}
+                            >
                             <Upload
                               size={14}
                               className="text-slate-400 group-hover:text-blue-600"
@@ -1613,6 +1720,7 @@ export default function App() {
                             />
                           </label>
                         </div>
+                      </div>
 
                         <div className="max-h-[300px] overflow-y-auto border border-slate-100 rounded-xl">
                           <table className="w-full text-left text-xs">
@@ -1647,7 +1755,8 @@ export default function App() {
                                           e.target.value
                                         )
                                       }
-                                      className="w-full bg-transparent outline-none focus:text-blue-600 font-medium"
+                                      onPaste={(e) => handleTargetSpectrumPaste(e, idx, 0)}
+                                      className="w-full bg-transparent outline-none focus:bg-blue-50/50 focus:text-blue-600 font-medium px-1 rounded transition-colors"
                                     />
                                   </td>
                                   <td className="px-4 py-2">
@@ -1664,7 +1773,8 @@ export default function App() {
                                           e.target.value
                                         )
                                       }
-                                      className="w-full bg-transparent outline-none focus:text-blue-600 font-medium"
+                                      onPaste={(e) => handleTargetSpectrumPaste(e, idx, 1)}
+                                      className="w-full bg-transparent outline-none focus:bg-blue-50/50 focus:text-blue-600 font-medium px-1 rounded transition-colors"
                                     />
                                   </td>
                                   <td className="px-4 py-2 text-right">
@@ -2011,6 +2121,25 @@ export default function App() {
                     </div>
                   </div>
                 </motion.div>
+              ) : activeTab === 'hazard' ? (
+                <motion.div
+                  key="hazard"
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  className="h-full overflow-y-auto"
+                >
+                  <HazardCalculator 
+                    siteClass={hazardSiteClass}
+                    setSiteClass={setHazardSiteClass}
+                    damping={hazardDamping}
+                    setDamping={setHazardDamping}
+                    pgaRefs={hazardPgaRefs}
+                    setPgaRefs={setHazardPgaRefs}
+                    hazard={hazardCurves}
+                    setHazard={setHazardCurves}
+                  />
+                </motion.div>
               ) : (
                 <motion.div
                   key="help"
@@ -2053,7 +2182,8 @@ export default function App() {
                           View the <strong>Structural Response</strong> tab for
                           time-history plots and real-time animation. Switch to{' '}
                           <strong>Demand Spectra</strong> to see Sa, Sv, Sd, and ADRS
-                          plots.
+                          plots. The <strong>Scaling</strong> tab provides a comparison
+                          between current and target spectra.
                         </p>
                       </div>
                       <div className="space-y-4">
@@ -2063,8 +2193,96 @@ export default function App() {
                         <p className="text-sm text-slate-600 leading-relaxed">
                           Use the <strong>Scaling</strong> tab to linearly scale the
                           current record or perform <strong>Wavelet Matching</strong>{' '}
-                          against a target spectrum. You can download the resulting
-                          current record directly from that tab.
+                          against a target spectrum.
+                        </p>
+                      </div>
+                      <div className="space-y-4">
+                        <h3 className="text-xs font-black text-blue-600 uppercase tracking-widest">
+                          5. Hazard Analysis
+                        </h3>
+                        <p className="text-sm text-slate-600 leading-relaxed">
+                          The <strong>Hazard</strong> tab provides tools for
+                          calculating design response spectra based on site class
+                          interpolation and PGA references (CSA Standard).
+                        </p>
+                      </div>
+                      <div className="space-y-4">
+                        <h3 className="text-xs font-black text-blue-600 uppercase tracking-widest">
+                          6. Excel Integration
+                        </h3>
+                        <p className="text-sm text-slate-600 leading-relaxed">
+                          The <strong>Hazard Data</strong> and <strong>Target Spectrum</strong> tables 
+                          support direct interaction with Excel. You can copy data from Excel 
+                          (two columns: Period and Sa) and <strong>paste</strong> it directly 
+                          into any cell in the table. Additionally, use the <strong>Copy</strong> icon 
+                          at the top of the tables to copy the entire dataset back to Excel.
+                        </p>
+                      </div>
+                      <div className="space-y-4">
+                        <h3 className="text-xs font-black text-blue-600 uppercase tracking-widest">
+                          7. Export & Download
+                        </h3>
+                        <p className="text-sm text-slate-600 leading-relaxed">
+                          Download matched acceleration records or export hazard
+                          calculation data as <strong>CSV</strong> for use in external
+                          software.
+                        </p>
+                      </div>
+                    </div>
+                  </section>
+
+                  <div className="h-px bg-slate-200" />
+
+                  <section className="space-y-8">
+                    <h2 className="text-2xl font-black text-slate-900 tracking-tight uppercase">
+                      Advanced Features
+                    </h2>
+                    
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-12">
+                      <div className="space-y-4">
+                        <h3 className="text-sm font-black text-slate-900 uppercase tracking-tight">
+                          Wavelet Spectral Matching
+                        </h3>
+                        <p className="text-sm text-slate-600 leading-relaxed">
+                          Unlike linear scaling which only shifts the entire record, 
+                          <strong> Wavelet Matching</strong> uses localized cosine wavelets 
+                          to surgically adjust the frequency content of the ground motion. 
+                          This ensures the resulting spectrum closely follows the target 
+                          shape across all periods while preserving the non-stationary 
+                          characteristics of the original record.
+                        </p>
+                      </div>
+
+                      <div className="space-y-4">
+                        <h3 className="text-sm font-black text-slate-900 uppercase tracking-tight">
+                          Hazard Analysis (CSA S06-19)
+                        </h3>
+                        <p className="text-sm text-slate-600 leading-relaxed">
+                          The Hazard Calculator implements the <strong>CSA S06-19</strong> 
+                          standard for seismic demand. It features automatic 
+                          <strong> Site Class Interpolation</strong> for $F(T)$ values 
+                          and applies the short-period plateau rule: 
+                          $S(T) = \max(F(0.2)S_a(0.2), F(0.5)S_a(0.5))$ for $T \le 0.2s$.
+                        </p>
+                      </div>
+
+                      <div className="space-y-4">
+                        <h3 className="text-sm font-black text-slate-900 uppercase tracking-tight">
+                          Force Dial Gauge
+                        </h3>
+                        <p className="text-sm text-slate-600 leading-relaxed">
+                          Located in the <strong>Force Balance</strong> plot, this analog 
+                          gauge visualizes the dynamic equilibrium: 
+                          <span className="block mt-2 font-mono text-[11px] bg-slate-50 p-2 rounded-lg border border-slate-100">
+                            Inertia (fI) + Damping (fD) + Stiffness (fS) = Total Load (p)
+                          </span>
+                        </p>
+                        <p className="text-sm text-slate-600 leading-relaxed">
+                          <strong>Angle Logic:</strong> To prevent hand overlap, we use a 
+                          "fictitious fan-out" strategy. While the primary direction 
+                          (Left/Right) represents the force sign, each component is 
+                          offset by a few degrees (±12°, ±24°) so you can see all 
+                          contributions simultaneously during high-intensity motion.
                         </p>
                       </div>
                     </div>
@@ -2115,7 +2333,7 @@ export default function App() {
       {/* Footer Info */}
       <footer className="fixed bottom-4 right-4 z-50">
         <div className="bg-white/80 backdrop-blur-md border border-slate-200 px-4 py-2 rounded-full shadow-lg flex items-center gap-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">
-          <span>v1.0.5</span>
+          <span>v1.1.0</span>
           <div className="w-px h-3 bg-slate-200" />
           <span>Newmark-Beta Solver</span>
         </div>

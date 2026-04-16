@@ -41,3 +41,8 @@ export interface SpectraData {
   peakT: number;
   peakSa: number;
 }
+
+export interface HazardPoint {
+  T: number;
+  Sa: number;
+}
