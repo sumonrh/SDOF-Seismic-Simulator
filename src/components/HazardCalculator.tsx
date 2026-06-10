@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { Download, Plus, RotateCcw, Trash2, MapPin, Search, Loader2, Copy, Check } from 'lucide-react';
 import { cn } from '../utils/cn';
-import { HazardPoint } from '../types';
+import { HazardPoint, MultiClassHazard } from '../types';
 import { DEFAULT_HAZARD, DEFAULT_PGA_REFS } from '../constants';
 
 const TABLES: Record<string, Record<string, (number | string)[]>> = {
@@ -68,6 +68,10 @@ interface HazardCalculatorProps {
   setPgaRefs: (refs: { rp2475: number; rp975: number; rp475: number }) => void;
   hazard: Record<string, HazardPoint[]>;
   setHazard: (h: Record<string, HazardPoint[]>) => void;
+  codeVersion: string;
+  setCodeVersion: (v: string) => void;
+  multiClassHazard: MultiClassHazard | null;
+  setMultiClassHazard: (m: MultiClassHazard | null) => void;
 }
 
 export function HazardCalculator({
@@ -78,7 +82,11 @@ export function HazardCalculator({
   pgaRefs,
   setPgaRefs,
   hazard,
-  setHazard
+  setHazard,
+  codeVersion,
+  setCodeVersion,
+  multiClassHazard,
+  setMultiClassHazard
 }: HazardCalculatorProps) {
   const [activeRp, setActiveRp] = useState<keyof typeof RP_LABELS>("rp2475");
   const [error, setError] = useState<string | null>(null);
@@ -88,11 +96,11 @@ export function HazardCalculator({
   // NRCAN API State
   const [lat, setLat] = useState<string>("43.701");
   const [lon, setLon] = useState<string>("-79.27");
-  const [codeVersion, setCodeVersion] = useState<string>("NBC2025");
   const [isFetching, setIsFetching] = useState(false);
   const [zones, setZones] = useState<string[]>([]);
 
   const fetchHazardData = async () => {
+    if (codeVersion === "NBC2015") return;
     if (siteClass === 'F') {
       setError("Site Class F requires specific study and is not supported by the API.");
       return;
@@ -103,22 +111,25 @@ export function HazardCalculator({
     setZones([]);
     
     try {
+      const classes = ['A', 'B', 'C', 'D', 'E'];
       const query = `
         query GetHazard($lat: Float!, $lon: Float!) {
           ${codeVersion}(latitude: $lat, longitude: $lon) {
             metadata {
               zones
             }
-            siteDesignationsXs(siteClass: C, poe50: [2.0, 5.0, 10.0]) {
-              poe50
-              pga
-              sa0p2
-              sa0p5
-              sa1p0
-              sa2p0
-              sa5p0
-              sa10p0
-            }
+            ${classes.map(sc => `
+              class${sc}: siteDesignationsXs(siteClass: ${sc}, poe50: [2.0, 5.0, 10.0]) {
+                poe50
+                pga
+                sa0p2
+                sa0p5
+                sa1p0
+                sa2p0
+                sa5p0
+                sa10p0
+              }
+            `).join('\n')}
           }
         }
       `;
@@ -146,43 +157,48 @@ export function HazardCalculator({
         throw new Error("No hazard data found for this location.");
       }
       
-      // Filter out model identifiers that aren't actually warnings (e.g., NBC_CNB2020_Canada)
       const filteredZones = (resultData.metadata?.zones || []).filter((z: string) => 
         !z.startsWith('NBC_CNB') && !z.toLowerCase().includes('canada')
       );
       setZones(filteredZones);
       
-      const data = resultData.siteDesignationsXs;
-      if (!data || data.length === 0) {
-        throw new Error("No hazard data found for this location.");
-      }
-      
+      const newMulti: MultiClassHazard = { rp2475: {}, rp975: {}, rp475: {} };
       const newPgaRefs = { ...pgaRefs };
-      const newHazard = { ...hazard };
-      
-      data.forEach((item: any) => {
-        let rpKey = "";
-        // Mapping probabilities to return periods
-        if (item.poe50 === 2.0) rpKey = "rp2475";
-        else if (item.poe50 === 5.0) rpKey = "rp975";
-        else if (item.poe50 === 10.0) rpKey = "rp475";
-        
-        if (rpKey) {
-          newPgaRefs[rpKey as keyof typeof pgaRefs] = item.pga;
-          newHazard[rpKey] = [
-            { T: 0, Sa: item.sa0p2 },
-            { T: 0.2, Sa: item.sa0p2 },
-            { T: 0.5, Sa: item.sa0p5 },
-            { T: 1.0, Sa: item.sa1p0 },
-            { T: 2.0, Sa: item.sa2p0 },
-            { T: 5.0, Sa: item.sa5p0 },
-            { T: 10.0, Sa: item.sa10p0 }
-          ];
+      const newHazardBaseline = { ...hazard };
+
+      classes.forEach(sc => {
+        const scData = resultData[`class${sc}`];
+        if (scData) {
+          scData.forEach((item: any) => {
+            let rpKey: "rp2475" | "rp975" | "rp475" | "" = "";
+            if (item.poe50 === 2.0) rpKey = "rp2475";
+            else if (item.poe50 === 5.0) rpKey = "rp975";
+            else if (item.poe50 === 10.0) rpKey = "rp475";
+            
+            if (rpKey) {
+              const pts = [
+                { T: 0, Sa: item.sa0p2 },
+                { T: 0.2, Sa: item.sa0p2 },
+                { T: 0.5, Sa: item.sa0p5 },
+                { T: 1.0, Sa: item.sa1p0 },
+                { T: 2.0, Sa: item.sa2p0 },
+                { T: 5.0, Sa: item.sa5p0 },
+                { T: 10.0, Sa: item.sa10p0 }
+              ];
+              newMulti[rpKey][sc] = pts;
+              
+              if (sc === 'C') {
+                newPgaRefs[rpKey] = item.pga;
+                newHazardBaseline[rpKey] = pts;
+              }
+            }
+          });
         }
       });
       
+      setMultiClassHazard(newMulti);
       setPgaRefs(newPgaRefs);
-      setHazard(newHazard);
+      setHazard(newHazardBaseline);
       setError(null);
     } catch (err: any) {
       setError("API Error: " + err.message);
@@ -197,45 +213,52 @@ export function HazardCalculator({
       if (damping <= 0) throw new Error("Damping must be greater than zero.");
       
       const rd = Math.pow(0.05 / damping, 0.4);
-      const allT = Array.from(new Set(Object.values(hazard).flat().map((p: HazardPoint) => p.T))).sort((a, b) => a - b);
+      const isModernCode = codeVersion === "NBC2020" || codeVersion === "NBC2025";
+      
+      const curvesForT = (isModernCode && multiClassHazard)
+        ? Object.values(multiClassHazard).flatMap(scMap => Object.values(scMap).flat())
+        : Object.values(hazard).flat();
+      
+      const allT = Array.from(new Set(curvesForT.map((p: HazardPoint) => p.T))).sort((a, b) => a - b);
       
       if (allT.length === 0) return { rows: [], rd };
 
       const rows = allT.map(T => {
         const res: any = { T };
         (["rp2475", "rp975", "rp475"] as const).forEach(rp => {
-          const curve = hazard[rp];
-          if (!curve || curve.length === 0) {
-            res[rp] = { f: NaN, st: NaN, sd: NaN };
-            return;
+          let sa: number;
+          let f: number;
+          let st: number;
+
+          if (isModernCode && multiClassHazard?.[rp]?.[siteClass]) {
+            sa = getSaAt(multiClassHazard[rp][siteClass], T);
+            f = 1.0;
+            st = sa * rd;
+          } else {
+            const curve = hazard[rp];
+            if (!curve || curve.length === 0) {
+              res[rp] = { f: NaN, st: NaN, sd: NaN };
+              return;
+            }
+            sa = getSaAt(curve, T);
+            const sa02_raw = getSaAt(curve, 0.2);
+            const pga_input = pgaRefs[rp];
+            const ratio = pga_input > 0 ? sa02_raw / pga_input : 0;
+            const pga_ref = ratio < 2.0 ? 0.8 * pga_input : pga_input;
+            f = getFofT(T, siteClass, pga_ref);
+            st = sa * f * rd;
+
+            if (T <= 0.2) {
+              const sa02 = getSaAt(curve, 0.2);
+              const f02 = getFofT(0.2, siteClass, pga_ref);
+              const st02 = sa02 * f02 * rd;
+              const sa05 = getSaAt(curve, 0.5);
+              const f05 = getFofT(0.5, siteClass, pga_ref);
+              const st05 = sa05 * f05 * rd;
+              st = Math.max(st02, st05);
+            }
           }
 
-          const sa = getSaAt(curve, T);
-          const sa02_raw = getSaAt(curve, 0.2);
-          const pga_input = pgaRefs[rp];
-          
-          // Clause 4.4.3.3: Calculate PGAref based on Sa(0.2)/PGA ratio
-          const ratio = pga_input > 0 ? sa02_raw / pga_input : 0;
-          const pga_ref = ratio < 2.0 ? 0.8 * pga_input : pga_input;
-
-          const f = getFofT(T, siteClass, pga_ref);
-          
-          let st = sa * f * rd;
-          
-          // Apply the special rule for S(T) when T <= 0.2s
-          if (T <= 0.2) {
-            const sa02 = getSaAt(curve, 0.2);
-            const f02 = getFofT(0.2, siteClass, pga_ref);
-            const st02 = sa02 * f02 * rd;
-            
-            const sa05 = getSaAt(curve, 0.5);
-            const f05 = getFofT(0.5, siteClass, pga_ref);
-            const st05 = sa05 * f05 * rd;
-            
-            st = Math.max(st02, st05);
-          }
-
-          // Sd(T) = 250 * S(T) * T^2
           const sd = T > 0 ? (250 * st * Math.pow(T, 2)) : 0;
           res[rp] = { f, st, sd };
         });
@@ -247,7 +270,7 @@ export function HazardCalculator({
       setError(e.message);
       return null;
     }
-  }, [siteClass, damping, pgaRefs, hazard]);
+  }, [siteClass, damping, pgaRefs, hazard, codeVersion, multiClassHazard]);
 
   const handleHazardChange = (idx: number, field: 'T' | 'Sa', value: number) => {
     const newHazard = { ...hazard };
@@ -405,41 +428,56 @@ export function HazardCalculator({
                 >
                   <option value="NBC2025">NBCC 2025</option>
                   <option value="NBC2020">NBCC 2020</option>
+                  <option value="NBC2015">NBCC 2015 or earlier</option>
                 </select>
               </div>
 
-              <div className="grid grid-cols-2 gap-3 mb-3">
-                <div>
-                  <label className="block text-[10px] font-bold text-blue-700 uppercase mb-1">Latitude</label>
-                  <input 
-                    type="number" step="0.001"
-                    className="w-full p-2 border border-blue-200 rounded-lg bg-white text-sm focus:ring-2 focus:ring-blue-500 focus:bg-blue-50/30 outline-none transition-all"
-                    value={lat}
-                    onChange={e => setLat(e.target.value)}
-                  />
+              {codeVersion !== "NBC2015" && (
+                <div className="grid grid-cols-2 gap-3 mb-3">
+                  <div>
+                    <label className="block text-[10px] font-bold text-blue-700 uppercase mb-1">Latitude</label>
+                    <input 
+                      type="number" step="0.001"
+                      className="w-full p-2 border border-blue-200 rounded-lg bg-white text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                      value={lat}
+                      onChange={e => setLat(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-blue-700 uppercase mb-1">Longitude</label>
+                    <input 
+                      type="number" step="0.001"
+                      className="w-full p-2 border border-blue-200 rounded-lg bg-white text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                      value={lon}
+                      onChange={e => setLon(e.target.value)}
+                    />
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-[10px] font-bold text-blue-700 uppercase mb-1">Longitude</label>
-                  <input 
-                    type="number" step="0.001"
-                    className="w-full p-2 border border-blue-200 rounded-lg bg-white text-sm focus:ring-2 focus:ring-blue-500 focus:bg-blue-50/30 outline-none transition-all"
-                    value={lon}
-                    onChange={e => setLon(e.target.value)}
-                  />
-                </div>
-              </div>
+              )}
               
               <button 
                 onClick={fetchHazardData}
-                disabled={isFetching || siteClass === 'F'}
+                disabled={isFetching || siteClass === 'F' || codeVersion === "NBC2015"}
                 className="w-full flex items-center justify-center gap-2 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white text-xs font-bold rounded-lg transition-colors shadow-sm"
               >
                 {isFetching ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
                 Fetch Hazard Data
               </button>
-              <p className="mt-2 text-[11px] text-blue-600/70 italic text-center">
-                * Fetches Site Class C data. Adjust site class in detailed output table.
-              </p>
+
+              {codeVersion === "NBC2015" && (
+                <p className="mt-3 text-[10px] text-blue-800 leading-tight">
+                  For NBCC 2015 or earlier, please go to{" "}
+                  <a 
+                    href="https://www.earthquakescanada.nrcan.gc.ca/hazard-alea/interpolat/calc-en.php" 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="text-blue-600 underline hover:text-blue-800 font-black"
+                  >
+                    this site
+                  </a>{" "}
+                  and get your data and write it down in the Hazard Data (Site Class C) table below.
+                </p>
+              )}
 
               {zones.length > 0 && (
                 <div className="mt-3 p-2 bg-amber-50 border border-amber-200 rounded-lg text-[10px] text-amber-800 space-y-1">
@@ -667,13 +705,13 @@ export function HazardCalculator({
                 <thead className="text-xs text-slate-500 bg-slate-50 sticky top-0">
                   <tr>
                     <th className="px-3 py-2 text-left">T (s)</th>
-                    <th className="px-3 py-2">F(T)₂₄₇₅</th>
+                    {(codeVersion === "NBC2015") && <th className="px-3 py-2">F(T)₂₄₇₅</th>}
                     <th className="px-3 py-2">ST₂₄₇₅ (g)</th>
                     <th className="px-3 py-2">Sd₂₄₇₅ (mm)</th>
-                    <th className="px-3 py-2">F(T)₉₇₅</th>
+                    {(codeVersion === "NBC2015") && <th className="px-3 py-2">F(T)₉₇₅</th>}
                     <th className="px-3 py-2">ST₉₇₅ (g)</th>
                     <th className="px-3 py-2">Sd₉₇₅ (mm)</th>
-                    <th className="px-3 py-2">F(T)₄₇₅</th>
+                    {(codeVersion === "NBC2015") && <th className="px-3 py-2">F(T)₄₇₅</th>}
                     <th className="px-3 py-2">ST₄₇₅ (g)</th>
                     <th className="px-3 py-2">Sd₄₇₅ (mm)</th>
                   </tr>
@@ -682,13 +720,13 @@ export function HazardCalculator({
                   {results?.rows.map((r: any, i: number) => (
                     <tr key={i} className="border-t border-slate-100 hover:bg-slate-50">
                       <td className="px-3 py-2 text-left font-semibold">{r.T.toFixed(2)}</td>
-                      <td className="px-3 py-2">{Number.isNaN(r.rp2475.f) ? "N/A" : r.rp2475.f.toFixed(3)}</td>
+                      {(codeVersion === "NBC2015") && <td className="px-3 py-2">{Number.isNaN(r.rp2475.f) ? "N/A" : r.rp2475.f.toFixed(3)}</td>}
                       <td className="px-3 py-2">{Number.isNaN(r.rp2475.st) ? "N/A" : r.rp2475.st.toFixed(3)}</td>
                       <td className="px-3 py-2">{Number.isNaN(r.rp2475.sd) ? "N/A" : Math.round(r.rp2475.sd)}</td>
-                      <td className="px-3 py-2">{Number.isNaN(r.rp975.f) ? "N/A" : r.rp975.f.toFixed(3)}</td>
+                      {(codeVersion === "NBC2015") && <td className="px-3 py-2">{Number.isNaN(r.rp975.f) ? "N/A" : r.rp975.f.toFixed(3)}</td>}
                       <td className="px-3 py-2">{Number.isNaN(r.rp975.st) ? "N/A" : r.rp975.st.toFixed(3)}</td>
                       <td className="px-3 py-2">{Number.isNaN(r.rp975.sd) ? "N/A" : Math.round(r.rp975.sd)}</td>
-                      <td className="px-3 py-2">{Number.isNaN(r.rp475.f) ? "N/A" : r.rp475.f.toFixed(3)}</td>
+                      {(codeVersion === "NBC2015") && <td className="px-3 py-2">{Number.isNaN(r.rp475.f) ? "N/A" : r.rp475.f.toFixed(3)}</td>}
                       <td className="px-3 py-2">{Number.isNaN(r.rp475.st) ? "N/A" : r.rp475.st.toFixed(3)}</td>
                       <td className="px-3 py-2">{Number.isNaN(r.rp475.sd) ? "N/A" : Math.round(r.rp475.sd)}</td>
                     </tr>

@@ -31,6 +31,7 @@ import {
   SpectraData,
   GroundMotion,
   HazardPoint,
+  MultiClassHazard,
 } from './types';
 import { DEFAULT_HAZARD, DEFAULT_PGA_REFS } from './constants';
 import {
@@ -173,6 +174,8 @@ export default function App() {
   const [hazardDamping, setHazardDamping] = useState(0.05);
   const [hazardPgaRefs, setHazardPgaRefs] = useState(DEFAULT_PGA_REFS);
   const [hazardCurves, setHazardCurves] = useState<Record<string, HazardPoint[]>>(JSON.parse(JSON.stringify(DEFAULT_HAZARD)));
+  const [hazardCodeVersion, setHazardCodeVersion] = useState("NBC2025");
+  const [hazardMultiClass, setHazardMultiClass] = useState<MultiClassHazard | null>(null);
 
   const previewScale = useMemo(() => {
     return Number.isFinite(calculatedScale) && calculatedScale > 0
@@ -1147,7 +1150,7 @@ export default function App() {
                   : 'border-transparent text-slate-400 hover:text-slate-600'
               )}
             >
-              S06-19 Hazard
+              NBCC Seismic Hazard
             </button>
             <button
               onClick={() => setActiveTab('help')}
@@ -2138,6 +2141,10 @@ export default function App() {
                     setPgaRefs={setHazardPgaRefs}
                     hazard={hazardCurves}
                     setHazard={setHazardCurves}
+                    codeVersion={hazardCodeVersion}
+                    setCodeVersion={setHazardCodeVersion}
+                    multiClassHazard={hazardMultiClass}
+                    setMultiClassHazard={setHazardMultiClass}
                   />
                 </motion.div>
               ) : (

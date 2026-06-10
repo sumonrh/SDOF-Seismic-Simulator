@@ -46,3 +46,5 @@ export interface HazardPoint {
   T: number;
   Sa: number;
 }
+
+export type MultiClassHazard = Record<string, Record<string, HazardPoint[]>>;
